@@ -336,13 +336,26 @@ def executive_summary(role_avg: pd.Series, align_df: pd.DataFrame) -> str:
 def make_network_graph(role_df: pd.DataFrame):
     """
     role_df index: Respondent
-    columns: ROLES with percent values
-    Draw exec-role graph with spring layout.
+    columns: ROLES with percent values (0-100)
+    Draw a readable exec-role network:
+      - Execs on the left, roles on the right (bipartite layout)
+      - Edge width scales with strength
+      - Labels shown as short names, full names in legend text below chart
+      - Figure margins expanded so nothing is cut off
     """
     G = nx.Graph()
 
     exec_nodes = list(role_df.index)
     role_nodes = list(role_df.columns)
+
+    # Short labels for readability (avoid long strings in the drawing area)
+    exec_short = {e: e for e in exec_nodes}  # keep as-is, but you can map to "CEO", "CFO", etc.
+    role_short = {
+        "Process & Governance Manager": "Governance",
+        "Director of Infrastructure": "Infrastructure",
+        "Enterprise Architect": "Architecture",
+        "Director of Information Security": "InfoSec",
+    }
 
     for e in exec_nodes:
         G.add_node(e, kind="exec")
@@ -352,35 +365,95 @@ def make_network_graph(role_df: pd.DataFrame):
     # Edges weighted by percent / 100
     for e in exec_nodes:
         for r in role_nodes:
-            w = float(role_df.loc[e, r]) / 100.0
+            pct = float(role_df.loc[e, r])
+            w = pct / 100.0
             if w <= 0:
                 continue
-            G.add_edge(e, r, weight=w)
+            # Keep all edges, but we can de-emphasize weak ones via alpha/width
+            G.add_edge(e, r, weight=w, pct=pct)
 
-    # Spring layout (web-like). Fixed seed for stable layout.
-    pos = nx.spring_layout(G, seed=42, k=0.9)
+    # --- Bipartite-like layout: execs left, roles right ---
+    # Spread nodes vertically, left/right fixed, with slight jitter so it doesn't look too rigid.
+    pos = {}
+    # Left column: execs
+    y_step_exec = 1.0 / max(len(exec_nodes), 1)
+    for i, e in enumerate(exec_nodes):
+        pos[e] = (-1.0, 0.5 - i * y_step_exec)
 
-    fig = plt.figure(figsize=(10, 6))
+    # Right column: roles
+    y_step_role = 1.0 / max(len(role_nodes), 1)
+    for i, r in enumerate(role_nodes):
+        pos[r] = (1.0, 0.5 - i * y_step_role)
+
+    # --- Draw ---
+    fig = plt.figure(figsize=(12.5, 6.5))
     ax = plt.gca()
     ax.axis("off")
 
-    # Edge widths by weight
-    weights = [G[u][v]["weight"] for u, v in G.edges()]
-    widths = [1 + 8 * w for w in weights]
+    # Edge styling
+    edges = list(G.edges())
+    weights = [G[u][v]["weight"] for u, v in edges]
 
-    nx.draw_networkx_edges(G, pos, width=widths, alpha=0.35, ax=ax)
+    # Make widths more readable: map [0..1] -> [1..10]
+    widths = [1 + 9 * w for w in weights]
 
-    # Nodes
-    exec_list = [n for n, d in G.nodes(data=True) if d.get("kind") == "exec"]
-    role_list = [n for n, d in G.nodes(data=True) if d.get("kind") == "role"]
+    # De-emphasize weak edges with alpha
+    alphas = [0.15 + 0.55 * w for w in weights]  # stronger edges are more visible
 
-    nx.draw_networkx_nodes(G, pos, nodelist=exec_list, node_size=900, ax=ax)
-    nx.draw_networkx_nodes(G, pos, nodelist=role_list, node_size=1300, ax=ax)
+    # Draw edges individually so alpha can vary
+    for (u, v), w, a, lw in zip(edges, weights, alphas, widths):
+        nx.draw_networkx_edges(G, pos, edgelist=[(u, v)], width=lw, alpha=a, ax=ax)
 
-    # Labels
-    nx.draw_networkx_labels(G, pos, font_size=9, ax=ax)
+    # Node sizes
+    exec_sizes = []
+    for e in exec_nodes:
+        # Size exec node by their average implication across roles (visual cue)
+        avg = float(role_df.loc[e, role_nodes].mean()) / 100.0
+        exec_sizes.append(900 + 1200 * avg)
 
+    role_sizes = []
+    for r in role_nodes:
+        # Size role node by team average implication
+        avg = float(role_df[r].mean()) / 100.0
+        role_sizes.append(1100 + 1400 * avg)
+
+    nx.draw_networkx_nodes(G, pos, nodelist=exec_nodes, node_size=exec_sizes, ax=ax)
+    nx.draw_networkx_nodes(G, pos, nodelist=role_nodes, node_size=role_sizes, ax=ax)
+
+    # Labels (short role names)
+    labels = {}
+    labels.update({e: exec_short[e] for e in exec_nodes})
+    labels.update({r: role_short.get(r, r) for r in role_nodes})
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=10, ax=ax)
+
+    # Optional: edge labels for only strong edges (keeps it readable)
+    edge_labels = {}
+    for u, v in edges:
+        pct = G[u][v]["pct"]
+        if pct >= 60:  # show only strong links
+            edge_labels[(u, v)] = f"{int(round(pct))}%"
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=9, rotate=False, ax=ax)
+
+    # Expand bounds so labels don't get cut off
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+    ax.set_xlim(min(xs) - 0.6, max(xs) + 0.6)
+    ax.set_ylim(min(ys) - 0.35, max(ys) + 0.35)
+
+    # Small legend text inside the figure (non-fancy, executive-friendly)
+    ax.text(
+        0.0, -0.12,
+        "How to read: Execs (left) connect to ownership domains (right). Thicker/darker lines indicate stronger implied need.\n"
+        "Role node size = team average implication. Exec node size = that exec's average implication across roles.",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=9
+    )
+
+    fig.tight_layout()
     return fig
+
 
 def stable_question_order(respondent: str, randomize: bool) -> list[int]:
     """

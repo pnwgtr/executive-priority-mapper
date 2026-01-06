@@ -721,7 +721,6 @@ def make_network_graph(
         font_size=9,
         rotate=False,
         ax=ax,
-        bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.65),
     )
 
     xs = [p[0] for p in pos.values()]
@@ -915,6 +914,16 @@ def main():
             st.info("No saved respondents yet. Complete the survey and click 'Save respondent' on the results page.")
             return
 
+        # Export raw responses (JSON)
+        raw_json_bytes = json.dumps(all_payloads, indent=2).encode("utf-8")
+        st.download_button(
+            "Download raw responses (JSON)",
+            data=raw_json_bytes,
+            file_name="executive_alignment_mapper_responses.json",
+            mime="application/json",
+            help="Exports the saved respondents and their answers.",
+        )
+
         cleaned = []
         for p in all_payloads:
             respondent = (p.get("respondent") or "").strip()
@@ -925,6 +934,19 @@ def main():
         if not cleaned:
             st.warning("Saved data exists, but no valid respondent entries were found (missing respondent name or answers).")
             return
+
+        # Filter which respondents to include
+        all_names = sorted({item["respondent"] for item in cleaned})
+        selected_names = st.multiselect(
+            "Respondents to include",
+            options=all_names,
+            default=all_names,
+            help="Select which saved respondents to include in the aggregate view.",
+        )
+        if not selected_names:
+            st.info("Select at least one respondent to show aggregate results.")
+            return
+        cleaned = [item for item in cleaned if item["respondent"] in selected_names]
 
         role_rows = []
         for item in cleaned:
@@ -995,6 +1017,28 @@ def main():
         # -----------------------------
         answer_dicts = [item["answers"] for item in cleaned]
         align_df = calc_alignment(answer_dicts)
+
+        # -----------------------------
+        # Raw responses (per question)
+        # -----------------------------
+        st.subheader("Responses (per question)")
+        with st.expander("Show per-question selections", expanded=False):
+            qids = [str(q[0]) for q in QUESTIONS]
+            raw_rows = []
+            for item in cleaned:
+                row = {"Respondent": item["respondent"]}
+                for qid in qids:
+                    row[qid] = item["answers"].get(qid, "")
+                raw_rows.append(row)
+            raw_df = pd.DataFrame(raw_rows)
+            st.dataframe(raw_df, use_container_width=True)
+            csv_answers = raw_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download per-question responses (CSV)",
+                data=csv_answers,
+                file_name="executive_alignment_mapper_answers.csv",
+                mime="text/csv",
+            )
 
         # -----------------------------
         # Respondent Results
@@ -1179,6 +1223,67 @@ def main():
                 st.success("Cleared. Reload the page.")
             except Exception as e:
                 st.error(f"Failed to clear saved respondents: {e}")
+
+        st.subheader("Manual entry (offline respondents)")
+        st.caption(
+            "Paste either: (1) a single respondent JSON object mapping question IDs to choices (A/B/C), "
+            "or (2) the downloaded JSON array of respondents from this app."
+        )
+        manual_name = st.text_input("Respondent (manual)", key="agg_manual_name")
+        manual_json = st.text_area("Answers JSON (question_id -> choice)", height=120, key="agg_manual_json")
+        if st.button("Save manual respondent (aggregate)", type="primary"):
+            name_clean = (manual_name or "").strip()
+            try:
+                parsed_raw = json.loads(manual_json or "{}")
+
+                # Normalize into a list of payloads to append
+                payloads: list[dict] = []
+
+                def normalize_answers(raw_answers: dict) -> dict[str, str]:
+                    parsed_ans: dict[str, str] = {}
+                    for k, v in (raw_answers or {}).items():
+                        k_str = str(k).strip()
+                        v_str = str(v).strip().upper()
+                        if k_str and v_str in {"A", "B", "C"}:
+                            parsed_ans[k_str] = v_str
+                    return parsed_ans
+
+                if isinstance(parsed_raw, list):
+                    for idx, entry in enumerate(parsed_raw):
+                        if not isinstance(entry, dict):
+                            continue
+                        resp = (entry.get("respondent") or name_clean or f"manual_{idx+1}").strip()
+                        answers_raw = entry.get("answers")
+                        if answers_raw is None and all(isinstance(k, str) for k in entry.keys()):
+                            # Treat entry itself as answers map
+                            answers_raw = entry
+                        answers_norm = normalize_answers(answers_raw or {})
+                        if resp and answers_norm:
+                            payloads.append({
+                                "timestamp": datetime.utcnow().isoformat() + "Z",
+                                "respondent": resp,
+                                "answers": answers_norm,
+                            })
+                elif isinstance(parsed_raw, dict):
+                    # Single entry: either has answers/respondent keys or is directly the answers map
+                    answers_raw = parsed_raw.get("answers") if "answers" in parsed_raw else parsed_raw
+                    resp = (parsed_raw.get("respondent") or name_clean).strip() if isinstance(parsed_raw, dict) else name_clean
+                    answers_norm = normalize_answers(answers_raw or {})
+                    if resp and answers_norm:
+                        payloads.append({
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                            "respondent": resp,
+                            "answers": answers_norm,
+                        })
+
+                if not payloads:
+                    st.error("No valid respondents/answers found. Provide A/B/C answers keyed by question id.")
+                else:
+                    for p in payloads:
+                        append_jsonl(RESPONSES_JSONL, p)
+                    st.success(f"Saved {len(payloads)} respondent(s). Reload to include in aggregates.")
+            except Exception as e:
+                st.error(f"Invalid JSON: {e}")
 
 
 def _top_roles(role_avg: pd.Series, n: int = 2) -> list[str]:

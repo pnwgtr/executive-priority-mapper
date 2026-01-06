@@ -1,7 +1,6 @@
 
 import json
 import os
-import random
 from datetime import datetime
 import textwrap
 
@@ -758,28 +757,11 @@ def main():
         st.session_state.responses = {}
     if "respondent" not in st.session_state:
         st.session_state.respondent = ""
-    if "randomize" not in st.session_state:
-        st.session_state.randomize = True
     if "order" not in st.session_state:
         st.session_state.order = None
     if "_order_prev_respondent" not in st.session_state:
         st.session_state._order_prev_respondent = ""
-    if "_order_prev_randomize" not in st.session_state:
-        st.session_state._order_prev_randomize = True
-
-    def stable_question_order(respondent: str, randomize: bool) -> list[int]:
-        """
-        Returns a deterministic question order per respondent when randomize is True.
-        This keeps answers correlatable (stored by qid) while avoiding grouped questions.
-        """
-        idxs = list(range(len(QUESTIONS)))
-        if not randomize:
-            return idxs
-        seed_source = (respondent or "anonymous").strip().lower()
-        seed = sum(ord(c) for c in seed_source) % 10_000
-        rng = random.Random(seed)
-        rng.shuffle(idxs)
-        return idxs
+    question_order = list(range(len(QUESTIONS)))
 
     tab_survey, tab_agg = st.tabs(["Survey", "Aggregate View"])
 
@@ -800,24 +782,17 @@ def main():
         with c_right:
             st.caption("Enter the executive name or title, then proceed through the questions.")
 
-        st.session_state.randomize = st.checkbox(
-            "Randomize question order (per respondent, but answers still saved by question ID)",
-            value=st.session_state.randomize,
-        )
-
-        # Build or refresh the order when respondent/randomize changes and no answers exist yet
+        # Build or refresh the order when respondent changes and no answers exist yet
         if (
             st.session_state.order is None
             or (
-                (st.session_state.respondent != st.session_state._order_prev_respondent
-                 or st.session_state.randomize != st.session_state._order_prev_randomize)
+                (st.session_state.respondent != st.session_state._order_prev_respondent)
                 and not st.session_state.responses
             )
         ):
-            st.session_state.order = stable_question_order(st.session_state.respondent, st.session_state.randomize)
+            st.session_state.order = question_order
             st.session_state.step = 0
             st.session_state._order_prev_respondent = st.session_state.respondent
-            st.session_state._order_prev_randomize = st.session_state.randomize
 
         order = st.session_state.order or list(range(len(QUESTIONS)))
         total = len(order)
@@ -889,10 +864,7 @@ def main():
                 if st.button("Restart survey"):
                     st.session_state.step = 0
                     st.session_state.responses = {}
-                    st.session_state.order = stable_question_order(
-                        st.session_state.respondent,
-                        st.session_state.randomize,
-                    )
+                    st.session_state.order = question_order
                     st.rerun()
             with c4:
                 if st.button("Back to last question"):
